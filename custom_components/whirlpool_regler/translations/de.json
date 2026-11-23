@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Whirlpool-Regler",
+        "description": "Wähle die Entitäten der Gecko-Integration. Der Regler ist danach der einzige, der den Gecko-Sollwert schreibt.",
+        "data": {
+          "climate_entity": "Gecko-Thermostat",
+          "watercare_entity": "Watercare-Modus",
+          "water_sensor": "Wassertemperatur (optional)"
+        },
+        "data_description": {
+          "water_sensor": "Leer lassen, um die Ist-Temperatur des Thermostats zu verwenden."
+        }
+      }
+    },
+    "error": {
+      "no_modes": "Diese Entität hat keine Watercare-Modi."
+    },
+    "abort": {
+      "already_configured": "Dieser Thermostat wird bereits geregelt."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Hysterese",
+        "data": {
+          "hysteresis_modes": "Hysterese in diesen Watercare-Modi"
+        }
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "regler": {
+        "state_attributes": {
+          "preset_mode": {
+            "name": "Watercare-Modus"
+          }
+        }
+      }
+    },
+    "select": {
+      "heizstab": {
+        "name": "Heizstab",
+        "state": {
+          "erlaubt": "Erlaubt",
+          "gesperrt": "Gesperrt"
+        }
+      }
+    },
+    "number": {
+      "hysterese": {
+        "name": "Hysterese-Spanne"
+      },
+      "heizstab_abstand": {
+        "name": "Abstand bei gesperrtem Heizstab"
+      }
+    },
+    "switch": {
+      "hysterese_aktiv": {
+        "name": "Hysterese"
+      }
+    },
+    "sensor": {
+      "regelphase": {
+        "name": "Regelphase",
+        "state": {
+          "wartet": "Wartet auf Daten",
+          "pausiert": "Pausiert",
+          "heizen": "Heizen",
+          "heizen_ohne_heizstab": "Heizen ohne Heizstab",
+          "ziel_erreicht": "Ziel erreicht",
+          "abgesenkt": "Abgesenkt (Hysterese)"
+        }
+      }
+    },
+    "binary_sensor": {
+      "heizstab_aktiv": {
+        "name": "Heizstab aktiv"
+      }
+    }
+  }
+}

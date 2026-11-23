@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Whirlpool-Regler",
+        "description": "Pick the entities of the Gecko integration. The Regler then is the only writer of the Gecko setpoint.",
+        "data": {
+          "climate_entity": "Gecko thermostat",
+          "watercare_entity": "Watercare mode",
+          "water_sensor": "Water temperature (optional)"
+        },
+        "data_description": {
+          "water_sensor": "Leave empty to use the thermostat's current temperature."
+        }
+      }
+    },
+    "error": {
+      "no_modes": "This entity has no watercare modes."
+    },
+    "abort": {
+      "already_configured": "This thermostat is already controlled."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Hysteresis",
+        "data": {
+          "hysteresis_modes": "Hysteresis in these watercare modes"
+        }
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "regler": {
+        "state_attributes": {
+          "preset_mode": {
+            "name": "Watercare mode"
+          }
+        }
+      }
+    },
+    "select": {
+      "heizstab": {
+        "name": "Heizstab",
+        "state": {
+          "erlaubt": "Allowed",
+          "gesperrt": "Locked"
+        }
+      }
+    },
+    "number": {
+      "hysterese": {
+        "name": "Hysteresis span"
+      },
+      "heizstab_abstand": {
+        "name": "Gap while heater is locked"
+      }
+    },
+    "switch": {
+      "hysterese_aktiv": {
+        "name": "Hysteresis"
+      }
+    },
+    "sensor": {
+      "regelphase": {
+        "name": "Control phase",
+        "state": {
+          "wartet": "Waiting for data",
+          "pausiert": "Paused",
+          "heizen": "Heating",
+          "heizen_ohne_heizstab": "Heating without heater",
+          "ziel_erreicht": "Target reached",
+          "abgesenkt": "Lowered (hysteresis)"
+        }
+      }
+    },
+    "binary_sensor": {
+      "heizstab_aktiv": {
+        "name": "Heater running"
+      }
+    }
+  }
+}

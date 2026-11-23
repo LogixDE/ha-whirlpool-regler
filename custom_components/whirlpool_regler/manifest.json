@@ -1,0 +1,13 @@
+{
+  "domain": "whirlpool_regler",
+  "name": "Whirlpool-Regler",
+  "codeowners": ["@LogixDE"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/LogixDE/ha-whirlpool-regler",
+  "integration_type": "helper",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/LogixDE/ha-whirlpool-regler/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
