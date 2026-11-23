@@ -1,11 +1,15 @@
 """Control logic of the Whirlpool-Regler, free of Home Assistant imports.
 
 The spa always runs in one watercare mode (Standard). The Regler is the only
-writer of the Gecko setpoint and implements its own eco mode with two
-targets:
+writer of the Gecko setpoint and implements its own eco mode with three
+profiles and two targets:
 
-* eco: the temperature the water is kept at when nobody bathes.
-* baden: the bathing temperature.
+* eco: keep the water at the eco temperature, heat pump only.
+* baden: heat to the bathing temperature, heat pump only.
+* baden_plus: heat to the bathing temperature, electric heater allowed.
+
+The heater is also allowed while the PV release is on (set by a PV automation
+as long as the energy balance stays positive).
 
 On top of the active target it derives the setpoint the spa gets:
 
@@ -14,7 +18,8 @@ On top of the active target it derives the setpoint the spa gets:
   short-cycle. When the water has cooled down by the span, the target is
   restored and the heat pump runs through.
 * Heater lock: with Smart Heat, Gecko switches the electric heater on when
-  the gap between setpoint and water is large. While the heater is locked,
+  the gap between setpoint and water is large. While the heater is locked
+  (every profile except baden_plus, unless the PV release is on),
   the setpoint is kept at water + gap (rounded up to the setpoint step) and
   tracked upwards as the water warms, never beyond the target.
 * Heater shedding: Gecko keeps a running heater on even when the gap gets
@@ -42,8 +47,15 @@ from typing import Any
 
 PROFILE_ECO = "eco"
 PROFILE_BATH = "baden"
-PROFILES = [PROFILE_ECO, PROFILE_BATH]
+PROFILE_BATH_PLUS = "baden_plus"
+PROFILES = [PROFILE_ECO, PROFILE_BATH, PROFILE_BATH_PLUS]
 
+# Targets: baden and baden_plus share the bathing temperature.
+TARGET_KEYS = {
+    PROFILE_ECO: PROFILE_ECO,
+    PROFILE_BATH: PROFILE_BATH,
+    PROFILE_BATH_PLUS: PROFILE_BATH,
+}
 DEFAULT_TARGETS = {PROFILE_ECO: 25.0, PROFILE_BATH: 37.0}
 
 # Seconds the water must stay at or above the target before lowering.
@@ -99,7 +111,7 @@ class Settings:
     active: bool = True
     hysteresis_enabled: bool = True
     span: float = 1.0
-    heater_locked: bool = False
+    heater_pv_release: bool = False
     heater_gap: float = 1.0
     work_mode: str = "Standard"
     min_temp: float = 8.0
@@ -170,7 +182,7 @@ class Regler:
         if data.get("profile") in PROFILES:
             self.profile = data["profile"]
         for name, value in (data.get("targets") or {}).items():
-            if name in PROFILES and value is not None:
+            if name in DEFAULT_TARGETS and value is not None:
                 self.targets[name] = float(value)
         self.lowered = bool(data.get("lowered", False))
 
@@ -178,15 +190,19 @@ class Regler:
 
     @property
     def target(self) -> float:
-        return self.targets[self.profile]
+        return self.targets[TARGET_KEYS[self.profile]]
+
+    @property
+    def heater_locked(self) -> bool:
+        return self.profile != PROFILE_BATH_PLUS and not self.settings.heater_pv_release
 
     # --- commands -----------------------------------------------------------
 
     def set_target(self, value: float, profile: str | None = None) -> None:
         """Set the target of a profile (default: the active one)."""
-        profile = profile or self.profile
-        self.targets[profile] = self._clamp(value)
-        if profile == self.profile:
+        key = TARGET_KEYS[profile or self.profile]
+        self.targets[key] = self._clamp(value)
+        if key == TARGET_KEYS[self.profile]:
             self._reset_control()
 
     def set_profile(self, profile: str) -> None:
@@ -256,7 +272,7 @@ class Regler:
                 and inp.now - self._last_write >= ECHO_WINDOW
                 and inp.now - self._seen_since >= EXTERNAL_STABLE
             ):
-                self.targets[self.profile] = inp.setpoint
+                self.targets[TARGET_KEYS[self.profile]] = inp.setpoint
             self._commanded = None
             return Decision(phase=PHASE_PAUSED, target=self.target)
 
@@ -299,7 +315,7 @@ class Regler:
             desired = self._round(target - s.span - 0.5)
             phase = PHASE_LOWERED
             self._cap = None
-        elif s.heater_locked and water + s.heater_gap < target - EPS:
+        elif self.heater_locked and water + s.heater_gap < target - EPS:
             cap = self._ceil(water + s.heater_gap)
             if self._cap is not None:
                 cap = max(cap, self._cap)
@@ -367,7 +383,7 @@ class Regler:
             self._seen_since = -math.inf
             return False
         # Someone else set a new value: it becomes the active target.
-        self.targets[self.profile] = self._clamp(sp)
+        self.targets[TARGET_KEYS[self.profile]] = self._clamp(sp)
         self._reset_control()
         self._commanded = sp
         self._pre_write_setpoint = None
@@ -376,7 +392,7 @@ class Regler:
 
     def _update_shedding(self, inp: Inputs) -> bool:
         """Track whether a locked heater has to be forced off."""
-        if not self.settings.heater_locked or self.lowered:
+        if not self.heater_locked or self.lowered:
             self._shedding = False
             self._heater_since = None
             self._heater_off_since = None

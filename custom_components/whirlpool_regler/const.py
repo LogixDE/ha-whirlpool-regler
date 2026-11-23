@@ -17,10 +17,6 @@ DEFAULT_WORK_MODE = "Standard"
 # Watercare options that cannot be selected as the work mode.
 NON_SELECTABLE_MODES = frozenset({"Other"})
 
-HEATER_ALLOWED = "erlaubt"
-HEATER_LOCKED = "gesperrt"
-HEATER_OPTIONS = [HEATER_ALLOWED, HEATER_LOCKED]
-
 STORAGE_VERSION = 1
 
 # Periodic re-evaluation. The logic works with settle and stability times,
@@ -31,7 +27,6 @@ PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.CLIMATE,
     Platform.NUMBER,
-    Platform.SELECT,
     Platform.SENSOR,
     Platform.SWITCH,
 ]

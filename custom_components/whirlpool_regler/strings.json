@@ -40,18 +40,10 @@
             "name": "Profile",
             "state": {
               "eco": "Eco",
-              "baden": "Bathing"
+              "baden": "Bathing",
+              "baden_plus": "Bathing+"
             }
           }
-        }
-      }
-    },
-    "select": {
-      "heizstab": {
-        "name": "Heizstab",
-        "state": {
-          "erlaubt": "Allowed",
-          "gesperrt": "Locked"
         }
       }
     },
@@ -72,6 +64,9 @@
     "switch": {
       "hysterese_aktiv": {
         "name": "Hysteresis"
+      },
+      "heizstab_pv_freigabe": {
+        "name": "Heater release (PV)"
       }
     },
     "sensor": {

@@ -100,6 +100,7 @@ class RegelClimate(RegelEntity, ClimateEntity):
             "abgesenkt": self.runtime.regler.lowered,
             "eco_temperatur": self.runtime.regler.targets["eco"],
             "badetemperatur": self.runtime.regler.targets["baden"],
+            "heizstab_erlaubt": not self.runtime.regler.heater_locked,
             "watercare_modus": self.runtime.mode,
             "heat_source": self.runtime.heat_source,
         }

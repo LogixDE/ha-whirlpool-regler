@@ -2,9 +2,12 @@
 
 Eine Regelschicht für Home Assistant, die auf der [Gecko-Integration](https://github.com/LogixDE/ha-gecko-integration) aufsetzt. Der Whirlpool läuft dauerhaft im Watercare-Modus **Standard**. Den Eco-Betrieb macht der Regler selbst. Er ist der einzige, der den Gecko-Sollwert schreibt.
 
-- **Zwei Ziele: Eco und Baden.** Eco-Temperatur und Badetemperatur sind einzeln einstellbar. Der Regler-Thermostat schaltet zwischen den Profilen `eco` und `baden` um und zeigt immer das echte Ziel des aktiven Profils, auch wenn der Gecko gerade einen abgesenkten oder gedeckelten Sollwert hat.
+- **Drei Profile: Eco, Baden, Baden+.** Eco-Temperatur und Badetemperatur sind einzeln einstellbar. Der Regler-Thermostat schaltet zwischen den Profilen um und zeigt immer das echte Ziel des aktiven Profils, auch wenn der Gecko gerade einen abgesenkten oder gedeckelten Sollwert hat.
+  - **Eco:** hält die Eco-Temperatur, nur Wärmepumpe.
+  - **Baden:** heizt auf die Badetemperatur, nur Wärmepumpe.
+  - **Baden+:** heizt auf die Badetemperatur, Heizstab erlaubt (schnell).
 - **Hysterese gegen Takten der Wärmepumpe (im Eco-Profil).** Hat das Wasser die Eco-Temperatur erreicht, senkt der Regler den Gecko-Sollwert auf Ziel − Spanne − 0,5 K. Ist das Wasser um die Spanne abgekühlt, setzt er wieder das Ziel. Die Wärmepumpe heizt dann am Stück durch, statt alle paar Minuten kurz anzuspringen.
-- **Heizstab sperren.** Im Modus Smart Heat schaltet der Gecko den Heizstab zu, wenn der Abstand zwischen Sollwert und Wasser groß ist. Ist der Heizstab gesperrt, hält der Regler den Gecko-Sollwert bei Wasser + Abstand und zieht ihn mit dem Wasser nach oben, bis das Ziel erreicht ist.
+- **Heizstab sperren.** Im Modus Smart Heat schaltet der Gecko den Heizstab zu, wenn der Abstand zwischen Sollwert und Wasser groß ist. Außer in Baden+ und bei eingeschalteter PV-Freigabe ist der Heizstab gesperrt: Der Regler hält den Gecko-Sollwert bei Wasser + Abstand und zieht ihn mit dem Wasser nach oben, bis das Ziel erreicht ist.
 - **Heizstab-Abwurf.** Der Gecko hält einen einmal gestarteten Heizstab auch bei kleinem Abstand an. Läuft er trotz Sperre länger als 60 s, setzt der Regler den Gecko-Sollwert kurz unter die Wassertemperatur, bis der Heizstab 30 s aus ist, und setzt danach wieder Wasser + Abstand.
 - **Watercare-Modus festhalten.** Stellt jemand den Watercare-Modus in der App oder am Bedienteil um, schaltet der Regler nach einer Minute zurück auf Standard. In einem anderen Modus schreibt er nie.
 
@@ -14,10 +17,10 @@ Die Gecko-API bietet keinen direkten Zugriff auf den Heizstab oder den Wärmepum
 
 | Entität | Zweck |
 |---|---|
-| `climate.whirlpool_regler` | Profil (`eco` / `baden`) und dessen Zieltemperatur. *Aus* pausiert den Regler (Gecko regelt allein, der Regler schreibt nichts). |
+| `climate.whirlpool_regler` | Profil (`eco` / `baden` / `baden_plus`) und dessen Zieltemperatur. *Aus* pausiert den Regler (Gecko regelt allein, der Regler schreibt nichts). |
 | `number.whirlpool_regler_eco_temperatur` | Eco-Temperatur |
 | `number.whirlpool_regler_badetemperatur` | Badetemperatur |
-| `select.whirlpool_regler_heizstab` | `erlaubt` / `gesperrt` |
+| `switch.whirlpool_regler_heizstab_freigabe_pv` | Gibt den Heizstab in jedem Profil frei. Gedacht für eine PV-Automation, die ihn ein- und ausschaltet, solange die Energiebilanz positiv ist. Wird nicht über Neustarts gespeichert. |
 | `number.whirlpool_regler_hysterese_spanne` | Spanne der Hysterese, 0,5–2 K |
 | `number.whirlpool_regler_abstand_bei_gesperrtem_heizstab` | Abstand Wasser → Sollwert bei gesperrtem Heizstab, 0,5–2 K |
 | `switch.whirlpool_regler_hysterese` | Hysterese ein/aus |
@@ -42,7 +45,7 @@ Den Watercare-Modus, in dem der Whirlpool läuft, stellst du in den Optionen der
 3. Einstellungen → Geräte & Dienste → Integration hinzufügen → *Whirlpool-Regler*. Gecko-Thermostat und Watercare-Select wählen, optional einen eigenen Wassertemperatursensor.
 4. Eco-Temperatur und Badetemperatur einstellen.
 
-**Wichtig:** Andere Automationen dürfen weder den Gecko-Sollwert noch den Watercare-Modus schreiben. Sie bedienen stattdessen den Regler: Profil, Eco-/Badetemperatur und Heizstab.
+**Wichtig:** Andere Automationen dürfen weder den Gecko-Sollwert noch den Watercare-Modus schreiben. Sie bedienen stattdessen den Regler: Profil, Eco-/Badetemperatur und PV-Freigabe des Heizstabs.
 
 ## Entwicklung
 

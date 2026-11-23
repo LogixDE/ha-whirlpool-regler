@@ -131,7 +131,7 @@ async def test_entities_profiles_and_targets(hass: HomeAssistant, calls, freezer
 
     climate_id = entity(hass, "climate", "regler")
     state = hass.states.get(climate_id)
-    assert state.attributes["preset_modes"] == ["eco", "baden"]
+    assert state.attributes["preset_modes"] == ["eco", "baden", "baden_plus"]
     assert state.attributes["preset_mode"] == "eco"
     assert state.attributes["temperature"] == 25.0
     assert hass.states.get(entity(hass, "number", "eco_temperatur")).state == "25.0"
@@ -150,7 +150,7 @@ async def test_entities_profiles_and_targets(hass: HomeAssistant, calls, freezer
     await hass.services.async_call(
         "climate",
         "set_preset_mode",
-        {"entity_id": climate_id, "preset_mode": "baden"},
+        {"entity_id": climate_id, "preset_mode": "baden_plus"},
         blocking=True,
     )
     assert calls == [38.0]
@@ -167,25 +167,31 @@ async def test_entities_profiles_and_targets(hass: HomeAssistant, calls, freezer
     assert hass.states.get(entity(hass, "number", "badetemperatur")).state == "37.5"
 
 
-async def test_heater_lock_caps_gecko_setpoint(hass: HomeAssistant, calls, freezer):
-    set_spa(hass, setpoint=37.0, water=31.5)
-    entry = await setup_entry(hass, freezer)
-    await entry.runtime_data.async_set_profile("baden")
-    calls.clear()
+async def test_bath_caps_and_pv_release_frees_heater(hass: HomeAssistant, calls, freezer):
+    set_spa(hass, setpoint=25.0, water=31.5)
+    await setup_entry(hass, freezer)
+    calls.clear()  # eco hysteresis lowered the setpoint meanwhile
+    climate_id = entity(hass, "climate", "regler")
     await hass.services.async_call(
-        "select",
-        "select_option",
-        {"entity_id": entity(hass, "select", "heizstab"), "option": "gesperrt"},
+        "climate",
+        "set_preset_mode",
+        {"entity_id": climate_id, "preset_mode": "baden"},
         blocking=True,
     )
-    assert calls == [32.5]
+    assert calls == [32.5]  # heat pump only: water + 1 K
     assert (
         hass.states.get(entity(hass, "sensor", "regelphase")).state
         == "heizen_ohne_heizstab"
     )
-    assert hass.states.get(entity(hass, "climate", "regler")).attributes[
-        "temperature"
-    ] == 37.0
+    assert hass.states.get(climate_id).attributes["temperature"] == 37.0
+    await hass.services.async_call(
+        "switch",
+        "turn_on",
+        {"entity_id": entity(hass, "switch", "heizstab_pv_freigabe")},
+        blocking=True,
+    )
+    assert calls == [32.5, 37.0]
+    assert hass.states.get(climate_id).attributes["heizstab_erlaubt"] is True
 
 
 async def test_wrong_mode_is_switched_back(hass: HomeAssistant, calls, freezer):
@@ -248,7 +254,7 @@ async def test_migrates_targets_from_version_0_1(
                 "Away": {"target": 23.5, "lowered": True},
                 "Standard": {"target": 38.0, "lowered": False},
             },
-            "settings": {"heater_locked": True, "heater_gap": 1.0},
+            "settings": {"heater_locked": True, "heater_gap": 1.5},
         },
     }
     entry.add_to_hass(hass)
@@ -257,5 +263,6 @@ async def test_migrates_targets_from_version_0_1(
     rt = entry.runtime_data
     assert rt.regler.targets == {"eco": 23.5, "baden": 38.0}
     assert rt.regler.profile == "baden"
-    assert rt.regler.settings.heater_locked is True
+    assert rt.regler.settings.heater_gap == 1.5
+    assert rt.regler.settings.heater_pv_release is False
     assert rt.regler.settings.work_mode == "Standard"

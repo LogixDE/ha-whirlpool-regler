@@ -83,6 +83,9 @@ class Spa:
 
 
 def make(eco=30.0, bath=37.0, profile="eco", **settings) -> Regler:
+    """Heater released by default so that tests not about the heater see the
+    plain target; heater tests pass heater_pv_release=False."""
+    settings.setdefault("heater_pv_release", True)
     r = Regler(Settings(**settings))
     r.targets = {"eco": eco, "baden": bath}
     r.profile = profile
@@ -242,7 +245,7 @@ def test_lost_write_is_retried_not_adopted():
 
 
 def test_heater_lock_keeps_gap_and_tracks_water():
-    spa = Spa(make(bath=36.0, profile="baden", heater_locked=True), water=31.5,
+    spa = Spa(make(bath=36.0, profile="baden", heater_pv_release=False), water=31.5,
               setpoints={"Standard": 36.0})
     d = spa.run(60)
     assert d.phase == PHASE_HEATING_NO_HEATER
@@ -261,29 +264,29 @@ def test_heater_lock_keeps_gap_and_tracks_water():
 
 
 def test_capped_setpoint_is_not_taken_as_external():
-    spa = Spa(make(profile="baden", heater_locked=True), water=30.0)
+    spa = Spa(make(profile="baden", heater_pv_release=False), water=30.0)
     spa.run(ECHO_WINDOW + EXTERNAL_STABLE + 120)
     assert spa.r.targets["baden"] == 37.0
 
 
 def test_unlocking_heater_restores_target():
-    spa = Spa(make(profile="baden", heater_locked=True), water=30.0)
+    spa = Spa(make(profile="baden", heater_pv_release=False), water=30.0)
     spa.run(60)
     assert spa.setpoints["Standard"] == 31.0
-    spa.r.settings.heater_locked = False
+    spa.r.settings.heater_pv_release = True
     spa.step(1, force=True)
     assert spa.setpoints["Standard"] == 37.0
 
 
 @pytest.mark.parametrize(("water", "expected"), [(31.2, 32.5), (31.5, 32.5), (31.6, 33.0)])
 def test_cap_is_rounded_up_to_step(water, expected):
-    spa = Spa(make(profile="baden", heater_locked=True), water=water)
+    spa = Spa(make(profile="baden", heater_pv_release=False), water=water)
     spa.run(60)
     assert spa.setpoints["Standard"] == expected
 
 
 def test_locked_heater_that_keeps_running_is_shed():
-    spa = Spa(make(bath=38.0, profile="baden", heater_locked=True), water=32.0)
+    spa = Spa(make(bath=38.0, profile="baden", heater_pv_release=False), water=32.0)
     spa.run(60)
     assert spa.setpoints["Standard"] == 33.0
     spa.heater = True  # Gecko keeps the heater latched at 1 K gap
@@ -353,3 +356,40 @@ def test_first_value_settles_before_writing():
     spa.step()
     spa.step(SETPOINT_SETTLE / 2)
     assert spa.writes == []
+
+
+def test_eco_and_bath_lock_heater_bath_plus_allows_it():
+    r = make(heater_pv_release=False)
+    for profile, locked in (("eco", True), ("baden", True), ("baden_plus", False)):
+        r.set_profile(profile)
+        assert r.heater_locked is locked
+    r.set_profile("baden")
+    r.settings.heater_pv_release = True
+    assert r.heater_locked is False
+
+
+def test_bath_plus_uses_bath_target_and_heats_without_cap():
+    spa = Spa(make(bath=38.0, profile="baden", heater_pv_release=False), water=32.0,
+              setpoints={"Standard": 33.0})
+    spa.run(60)
+    assert spa.setpoints["Standard"] == 33.0
+    spa.r.set_profile("baden_plus")
+    spa.step(1, force=True)
+    assert spa.setpoints["Standard"] == 38.0
+    spa.r.set_target(38.5)
+    assert spa.r.targets == {"eco": 30.0, "baden": 38.5}
+
+
+def test_pv_release_switches_heater_on_and_off_dynamically():
+    spa = Spa(make(bath=38.0, profile="baden", heater_pv_release=False), water=32.0)
+    spa.run(60)
+    assert spa.setpoints["Standard"] == 33.0
+    spa.r.settings.heater_pv_release = True
+    spa.step(1, force=True)
+    assert spa.setpoints["Standard"] == 38.0
+    spa.heater = True
+    spa.r.settings.heater_pv_release = False
+    spa.step(1, force=True)
+    assert spa.setpoints["Standard"] == 33.0
+    # Gecko keeps the heater latched: it is shed after the delay.
+    assert spa.run(HEATER_SHED_DELAY + 30).phase == PHASE_SHEDDING

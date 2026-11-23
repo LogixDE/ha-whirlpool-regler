@@ -51,7 +51,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _BAD_STATES = (STATE_UNAVAILABLE, STATE_UNKNOWN, None)
 
-_SETTING_KEYS = ("active", "hysteresis_enabled", "span", "heater_locked", "heater_gap")
+_SETTING_KEYS = ("active", "hysteresis_enabled", "span", "heater_gap")
 
 
 def _float(value: Any) -> float | None:
@@ -127,7 +127,9 @@ class WhirlpoolRuntime:
         migrated = {
             "profile": "eco" if self.mode == "Away" else "baden",
             "targets": targets,
-            "settings": data.get("settings", {}),
+            "settings": {
+                k: v for k, v in (data.get("settings") or {}).items() if k in _SETTING_KEYS
+            },
         }
         _LOGGER.info("Migrated Regler state from 0.1: %s", migrated)
         return migrated

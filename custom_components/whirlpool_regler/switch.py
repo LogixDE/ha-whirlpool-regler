@@ -18,7 +18,8 @@ async def async_setup_entry(
     entry: WhirlpoolConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities([HysteresisSwitch(entry.runtime_data)])
+    runtime = entry.runtime_data
+    async_add_entities([HysteresisSwitch(runtime), HeaterPvReleaseSwitch(runtime)])
 
 
 class HysteresisSwitch(RegelEntity, SwitchEntity):
@@ -36,3 +37,25 @@ class HysteresisSwitch(RegelEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.runtime.async_set_setting("hysteresis_enabled", False)
+
+
+class HeaterPvReleaseSwitch(RegelEntity, SwitchEntity):
+    """Allows the heater in every profile while on.
+
+    Meant for a PV automation that switches it on as long as the energy
+    balance stays positive. Not persisted across restarts on purpose: after a
+    restart the automation decides again.
+    """
+
+    def __init__(self, runtime) -> None:
+        super().__init__(runtime, "heizstab_pv_freigabe")
+
+    @property
+    def is_on(self) -> bool:
+        return self.runtime.regler.settings.heater_pv_release
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self.runtime.async_set_setting("heater_pv_release", True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self.runtime.async_set_setting("heater_pv_release", False)
