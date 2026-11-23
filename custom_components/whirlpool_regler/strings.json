@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Whirlpool-Regler",
-        "description": "Pick the entities of the Gecko integration. The Regler then is the only writer of the Gecko setpoint.",
+        "description": "Pick the entities of the Gecko integration. The Regler then is the only writer of the Gecko setpoint and keeps the spa in the Standard watercare mode.",
         "data": {
           "climate_entity": "Gecko thermostat",
           "watercare_entity": "Watercare mode",
@@ -24,9 +24,10 @@
   "options": {
     "step": {
       "init": {
-        "title": "Hysteresis",
+        "title": "Watercare mode",
+        "description": "The spa always runs in this watercare mode; the Regler implements eco itself and switches back after a minute if the mode is changed elsewhere.",
         "data": {
-          "hysteresis_modes": "Hysteresis in these watercare modes"
+          "work_mode": "Work mode"
         }
       }
     }
@@ -36,7 +37,11 @@
       "regler": {
         "state_attributes": {
           "preset_mode": {
-            "name": "Watercare mode"
+            "name": "Profile",
+            "state": {
+              "eco": "Eco",
+              "baden": "Bathing"
+            }
           }
         }
       }
@@ -56,6 +61,12 @@
       },
       "heizstab_abstand": {
         "name": "Gap while heater is locked"
+      },
+      "eco_temperatur": {
+        "name": "Eco temperature"
+      },
+      "badetemperatur": {
+        "name": "Bathing temperature"
       }
     },
     "switch": {
@@ -73,7 +84,8 @@
           "heizen_ohne_heizstab": "Heating without heater",
           "ziel_erreicht": "Target reached",
           "abgesenkt": "Lowered (hysteresis)",
-          "heizstab_abwurf": "Shedding heater"
+          "heizstab_abwurf": "Shedding heater",
+          "falscher_modus": "Wrong watercare mode"
         }
       }
     },

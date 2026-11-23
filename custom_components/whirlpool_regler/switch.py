@@ -31,10 +31,6 @@ class HysteresisSwitch(RegelEntity, SwitchEntity):
     def is_on(self) -> bool:
         return self.runtime.regler.settings.hysteresis_enabled
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {"modi": sorted(self.runtime.regler.settings.hysteresis_modes)}
-
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.runtime.async_set_setting("hysteresis_enabled", True)
 

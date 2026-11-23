@@ -16,7 +16,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import WhirlpoolConfigEntry
 from .entity import RegelEntity
-from .logic import PHASE_WAITING
+from .logic import PROFILES
 
 
 async def async_setup_entry(
@@ -28,11 +28,16 @@ async def async_setup_entry(
 
 
 class RegelClimate(RegelEntity, ClimateEntity):
-    """HEAT = Regler active, OFF = Regler paused (Gecko keeps heating)."""
+    """HEAT = Regler active, OFF = Regler paused (Gecko keeps heating).
+
+    Presets are the Regler's own profiles (eco, baden); the target is the one
+    of the active profile.
+    """
 
     _attr_name = None
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = [HVACMode.HEAT, HVACMode.OFF]
+    _attr_preset_modes = PROFILES
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.PRESET_MODE
@@ -67,7 +72,7 @@ class RegelClimate(RegelEntity, ClimateEntity):
 
     @property
     def target_temperature(self) -> float | None:
-        return self.runtime.regler.target(self.runtime.mode)
+        return self.runtime.regler.target
 
     @property
     def min_temp(self) -> float:
@@ -82,12 +87,8 @@ class RegelClimate(RegelEntity, ClimateEntity):
         return self.runtime.regler.settings.step
 
     @property
-    def preset_modes(self) -> list[str]:
-        return self.runtime.mode_options
-
-    @property
-    def preset_mode(self) -> str | None:
-        return self.runtime.mode
+    def preset_mode(self) -> str:
+        return self.runtime.regler.profile
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -96,7 +97,10 @@ class RegelClimate(RegelEntity, ClimateEntity):
             "regelphase": d.phase,
             "gecko_sollwert": self.runtime.gecko_setpoint,
             "geplanter_sollwert": d.desired,
-            "abgesenkt": self.runtime.regler.lowered(self.runtime.mode),
+            "abgesenkt": self.runtime.regler.lowered,
+            "eco_temperatur": self.runtime.regler.targets["eco"],
+            "badetemperatur": self.runtime.regler.targets["baden"],
+            "watercare_modus": self.runtime.mode,
             "heat_source": self.runtime.heat_source,
         }
 
@@ -105,7 +109,7 @@ class RegelClimate(RegelEntity, ClimateEntity):
             await self.runtime.async_set_target(float(temperature))
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
-        await self.runtime.async_set_mode(preset_mode)
+        await self.runtime.async_set_profile(preset_mode)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         await self.runtime.async_set_setting("active", hvac_mode != HVACMode.OFF)

@@ -39,5 +39,6 @@ class PhaseSensor(RegelEntity, SensorEntity):
             "zieltemperatur": d.target,
             "geplanter_sollwert": d.desired,
             "gecko_sollwert": self.runtime.gecko_setpoint,
+            "profil": self.runtime.regler.profile,
             "watercare_modus": self.runtime.mode,
         }

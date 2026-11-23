@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from homeassistant.components.number import NumberEntity, NumberMode
+from homeassistant.components.number import (
+    NumberDeviceClass,
+    NumberEntity,
+    NumberMode,
+)
 from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -34,7 +38,14 @@ async def async_setup_entry(
     entry: WhirlpoolConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities(RegelNumber(entry.runtime_data, spec) for spec in SPECS)
+    runtime = entry.runtime_data
+    async_add_entities(
+        [
+            *(RegelNumber(runtime, spec) for spec in SPECS),
+            TargetNumber(runtime, "eco_temperatur", "eco"),
+            TargetNumber(runtime, "badetemperatur", "baden"),
+        ]
+    )
 
 
 class RegelNumber(RegelEntity, NumberEntity):
@@ -55,3 +66,34 @@ class RegelNumber(RegelEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         await self.runtime.async_set_setting(self._spec.setting, float(value))
+
+
+class TargetNumber(RegelEntity, NumberEntity):
+    """Target temperature of one profile (eco or baden)."""
+
+    _attr_device_class = NumberDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, runtime, key: str, profile: str) -> None:
+        super().__init__(runtime, key)
+        self._profile = profile
+
+    @property
+    def native_min_value(self) -> float:
+        return self.runtime.regler.settings.min_temp
+
+    @property
+    def native_max_value(self) -> float:
+        return self.runtime.regler.settings.max_temp
+
+    @property
+    def native_step(self) -> float:
+        return self.runtime.regler.settings.step
+
+    @property
+    def native_value(self) -> float:
+        return self.runtime.regler.targets[self._profile]
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.runtime.async_set_target(float(value), self._profile)

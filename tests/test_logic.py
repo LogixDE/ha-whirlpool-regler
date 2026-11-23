@@ -7,19 +7,19 @@ import pytest
 from custom_components.whirlpool_regler.logic import (
     ECHO_WINDOW,
     EXTERNAL_STABLE,
-    MODE_GRACE,
-    MODE_SETTLE,
+    HEATER_OFF_HOLD,
+    HEATER_SHED_DELAY,
+    MODE_ENFORCE_DELAY,
     PHASE_HEATING,
     PHASE_HEATING_NO_HEATER,
     PHASE_HOLDING,
     PHASE_LOWERED,
     PHASE_PAUSED,
+    PHASE_SHEDDING,
     PHASE_WAITING,
+    PHASE_WRONG_MODE,
     REACHED_DELAY,
     SETPOINT_SETTLE,
-    HEATER_OFF_HOLD,
-    HEATER_SHED_DELAY,
-    PHASE_SHEDDING,
     Inputs,
     Regler,
     Settings,
@@ -27,18 +27,27 @@ from custom_components.whirlpool_regler.logic import (
 
 
 class Spa:
-    """Minimal spa model: one setpoint per mode, writes land in the current mode."""
+    """Minimal spa model: one setpoint per watercare mode, writes land in the
+    current mode, mode switches requested by the Regler are applied."""
 
-    def __init__(self, regler: Regler, *, mode="Away", water=30.0, setpoints=None):
+    def __init__(
+        self,
+        regler: Regler,
+        *,
+        mode="Standard",
+        water=30.0,
+        setpoints=None,
+    ):
         self.r = regler
         self.now = 1000.0
         self.mode = mode
         self.water = water
-        self.setpoints = dict(setpoints or {"Away": 30.0, "Standard": 36.0})
+        self.setpoints = dict(setpoints or {"Away": 22.0, "Standard": 30.0})
         self.available = True
-        self.writes: list[tuple[str, float]] = []
-        self.drop_writes = False
         self.heater = False
+        self.writes: list[tuple[str, float]] = []
+        self.mode_switches: list[str] = []
+        self.drop_writes = False
 
     @property
     def setpoint(self):
@@ -57,6 +66,9 @@ class Spa:
             ),
             force=force,
         )
+        if d.switch_mode is not None:
+            self.mode_switches.append(d.switch_mode)
+            self.mode = d.switch_mode
         if d.write is not None:
             self.writes.append((self.mode, d.write))
             if not self.drop_writes:
@@ -70,18 +82,20 @@ class Spa:
         return d
 
 
-def make(**settings) -> Regler:
-    return Regler(Settings(**settings))
+def make(eco=30.0, bath=37.0, profile="eco", **settings) -> Regler:
+    r = Regler(Settings(**settings))
+    r.targets = {"eco": eco, "baden": bath}
+    r.profile = profile
+    return r
 
 
-def test_first_contact_adopts_current_setpoint_without_writing():
-    spa = Spa(make(), water=25.0)
-    assert spa.step().phase == PHASE_WAITING
-    d = spa.step(SETPOINT_SETTLE)
-    assert d.target == 30.0
-    assert d.phase == PHASE_HEATING
-    spa.run(120)
-    assert spa.writes == []
+def test_startup_waits_then_writes_active_target():
+    spa = Spa(make(eco=25.0, hysteresis_enabled=False), water=20.0,
+              setpoints={"Standard": 34.0})
+    assert spa.step().write is None
+    spa.run(60)
+    assert spa.setpoints["Standard"] == 25.0
+    assert spa.writes == [("Standard", 25.0)]
 
 
 def test_unavailable_waits_and_does_not_write():
@@ -92,264 +106,250 @@ def test_unavailable_waits_and_does_not_write():
     assert d.write is None
 
 
-def test_hysteresis_lowers_after_delay_and_restores_after_cooling():
-    spa = Spa(make(span=1.0), water=29.0)
-    spa.run(120)
+def test_profile_switch_writes_other_target():
+    spa = Spa(make(eco=25.0, bath=37.0), water=24.0, setpoints={"Standard": 25.0})
+    spa.run(60)
+    assert spa.writes == []
+    spa.r.set_profile("baden")
+    d = spa.step(1, force=True)
+    assert d.phase == PHASE_HEATING
+    assert spa.setpoints["Standard"] == 37.0
+    spa.r.set_profile("eco")
+    spa.step(1, force=True)
+    assert spa.setpoints["Standard"] == 25.0
+
+
+def test_hysteresis_in_eco_lowers_and_restores_without_drift():
+    spa = Spa(make(eco=30.0, span=1.0), water=29.0)
+    spa.run(60)
     spa.water = 30.0
-    d = spa.step(15)
-    assert d.phase == PHASE_HOLDING
+    assert spa.step(15).phase == PHASE_HOLDING
     d = spa.run(REACHED_DELAY + 15)
     assert d.phase == PHASE_LOWERED
-    assert spa.setpoints["Away"] == 28.5  # 30 - 1 - 0.5
-    # Cools down, but not by the full span yet.
+    assert spa.setpoints["Standard"] == 28.5
     spa.water = 29.5
     assert spa.run(60).phase == PHASE_LOWERED
     spa.water = 29.0
-    d = spa.step(15)
-    assert d.phase == PHASE_HEATING
-    assert spa.setpoints["Away"] == 30.0
-    # Target is never lost: no drift over several cycles.
+    assert spa.step(15).phase == PHASE_HEATING
+    assert spa.setpoints["Standard"] == 30.0
     for _ in range(3):
         spa.water = 30.0
         spa.run(REACHED_DELAY + 30)
         spa.water = 29.0
         spa.run(30)
-    assert spa.r.target("Away") == 30.0
-    assert spa.setpoints["Away"] == 30.0
+    assert spa.r.targets["eco"] == 30.0
+    assert spa.setpoints["Standard"] == 30.0
 
 
-def test_hysteresis_only_in_configured_modes():
-    spa = Spa(make(), mode="Standard", water=36.0)
-    spa.run(300)
+def test_no_hysteresis_when_bathing():
+    spa = Spa(make(bath=37.0, profile="baden"), water=37.0, setpoints={"Standard": 37.0})
+    spa.run(600)
     assert spa.writes == []
     assert spa.step().phase == PHASE_HOLDING
 
 
-def test_mode_change_never_writes_away_target_into_standard():
-    spa = Spa(make(), water=30.0)
+def test_switching_to_bath_while_lowered_ends_lowering():
+    spa = Spa(make(eco=30.0), water=30.0)
     spa.run(120)
-    assert spa.setpoints["Away"] == 28.5
-    spa.mode = "Standard"
-    spa.run(600)
-    assert spa.setpoints["Standard"] == 36.0
-    assert all(mode == "Away" for mode, _ in spa.writes)
-    assert spa.r.target("Away") == 30.0
-    # Back in Away: still lowered, restores once the water has cooled.
-    spa.mode = "Away"
-    spa.water = 28.5
+    assert spa.r.lowered
+    spa.r.set_profile("baden")
+    spa.step(1, force=True)
+    assert not spa.r.lowered
+    assert spa.setpoints["Standard"] == 37.0
+
+
+def test_wrong_watercare_mode_is_switched_back_and_never_written():
+    spa = Spa(make(eco=30.0), water=29.0)
     spa.run(60)
-    assert spa.setpoints["Away"] == 30.0
+    spa.mode = "Away"
+    d = spa.step(1)
+    assert d.phase == PHASE_WRONG_MODE
+    assert d.switch_mode is None
+    spa.run(MODE_ENFORCE_DELAY + 15)
+    assert spa.mode_switches == ["Standard"]
+    assert spa.mode == "Standard"
+    assert all(mode == "Standard" for mode, _ in spa.writes)
+    assert spa.setpoints["Away"] == 22.0
 
 
-def test_no_write_until_mode_has_settled():
-    spa = Spa(make(), water=25.0)
-    spa.step()
+def test_stale_setpoint_after_returning_to_work_mode_is_not_adopted():
+    spa = Spa(make(eco=30.0, hysteresis_enabled=False), water=29.0)
+    spa.run(60)
+    spa.mode = "Away"
+    spa.step(1)
     spa.mode = "Standard"
-    spa.step()
-    spa.r.set_target("Standard", 38.0)
-    d = spa.step(1, force=True)
-    assert d.write is None
-    spa.run(MODE_SETTLE + 15)
-    assert spa.setpoints["Standard"] == 38.0
+    # Gecko reports the Away setpoint for a few seconds.
+    real = spa.setpoints["Standard"]
+    spa.setpoints["Standard"] = 22.0
+    spa.step(1)
+    spa.step(6)
+    spa.setpoints["Standard"] = real
+    spa.run(300)
+    assert spa.r.targets["eco"] == 30.0
+    assert spa.setpoints["Standard"] == 30.0
 
 
 def test_echo_of_old_value_is_ignored():
-    spa = Spa(make(), mode="Standard", water=30.0)
+    spa = Spa(make(eco=30.0, hysteresis_enabled=False), water=25.0)
     spa.run(60)
-    spa.r.set_target("Standard", 37.0)
+    spa.r.set_target(31.0)
     spa.step(1, force=True)
-    assert spa.setpoints["Standard"] == 37.0
-    # Gecko briefly reports the old value again.
-    spa.setpoints["Standard"] = 36.0
+    assert spa.setpoints["Standard"] == 31.0
+    spa.setpoints["Standard"] = 30.0
     spa.step(5)
-    spa.setpoints["Standard"] = 37.0
+    spa.setpoints["Standard"] = 31.0
     spa.run(ECHO_WINDOW + EXTERNAL_STABLE + 30)
-    assert spa.r.target("Standard") == 37.0
+    assert spa.r.targets["eco"] == 31.0
 
 
 def test_midnight_blip_is_ignored():
-    spa = Spa(make(), mode="Standard", water=30.0)
+    spa = Spa(make(eco=30.0, hysteresis_enabled=False), water=25.0)
     spa.run(60)
     spa.setpoints["Standard"] = 39.0
     spa.step(1)
-    spa.setpoints["Standard"] = 36.0
+    spa.setpoints["Standard"] = 30.0
     spa.step(1)
     spa.run(300)
-    assert spa.r.target("Standard") == 36.0
+    assert spa.r.targets["eco"] == 30.0
     assert spa.writes == []
 
 
-def test_stable_external_change_becomes_new_target():
-    spa = Spa(make(), mode="Standard", water=30.0)
+def test_stable_external_change_becomes_target_of_active_profile():
+    spa = Spa(make(eco=30.0, bath=37.0, profile="baden"), water=30.0,
+              setpoints={"Standard": 37.0})
     spa.run(60)
-    spa.setpoints["Standard"] = 37.5  # changed in the app
-    d = None
+    spa.setpoints["Standard"] = 38.5  # changed in the app
     adopted = False
     for _ in range(10):
-        d = spa.step(15)
-        adopted = adopted or d.adopted_external
+        adopted = spa.step(15).adopted_external or adopted
     assert adopted
-    assert spa.r.target("Standard") == 37.5
+    assert spa.r.targets == {"eco": 30.0, "baden": 38.5}
     assert spa.writes == []
-
-
-def test_external_change_while_lowered_ends_lowering():
-    spa = Spa(make(), water=30.0)
-    spa.run(120)
-    assert spa.r.lowered("Away")
-    spa.setpoints["Away"] = 32.0
-    spa.run(ECHO_WINDOW + EXTERNAL_STABLE + 30)
-    assert spa.r.target("Away") == 32.0
-    assert not spa.r.lowered("Away")
 
 
 def test_lost_write_is_retried_not_adopted():
-    spa = Spa(make(), mode="Standard", water=30.0)
+    spa = Spa(make(eco=30.0, hysteresis_enabled=False), water=25.0)
     spa.run(60)
     spa.drop_writes = True
-    spa.r.set_target("Standard", 38.0)
+    spa.r.set_profile("baden")
     spa.step(1, force=True)
     spa.run(ECHO_WINDOW + EXTERNAL_STABLE + 30)
-    assert spa.r.target("Standard") == 38.0
+    assert spa.r.targets["baden"] == 37.0
     assert len(spa.writes) >= 2
     spa.drop_writes = False
     spa.run(ECHO_WINDOW + EXTERNAL_STABLE + 30)
-    assert spa.setpoints["Standard"] == 38.0
+    assert spa.setpoints["Standard"] == 37.0
 
 
 def test_heater_lock_keeps_gap_and_tracks_water():
-    spa = Spa(make(heater_locked=True, heater_gap=1.0), mode="Standard", water=31.5)
-    spa.step()
-    spa.r.set_target("Standard", 36.0)
+    spa = Spa(make(bath=36.0, profile="baden", heater_locked=True), water=31.5,
+              setpoints={"Standard": 36.0})
     d = spa.run(60)
     assert d.phase == PHASE_HEATING_NO_HEATER
     assert spa.setpoints["Standard"] == 32.5
-    assert spa.r.target("Standard") == 36.0
     spa.water = 32.0
     spa.run(30)
     assert spa.setpoints["Standard"] == 33.0
-    # A lower reading never lowers the cap again.
     spa.water = 31.5
     spa.run(30)
     assert spa.setpoints["Standard"] == 33.0
-    # Close to the target the real target is used.
     spa.water = 35.5
     d = spa.run(30)
     assert spa.setpoints["Standard"] == 36.0
     assert d.phase == PHASE_HEATING
+    assert spa.r.targets["baden"] == 36.0
 
 
 def test_capped_setpoint_is_not_taken_as_external():
-    spa = Spa(make(heater_locked=True), mode="Standard", water=30.0)
-    spa.run(60)
-    spa.run(ECHO_WINDOW + EXTERNAL_STABLE + 60)
-    assert spa.r.target("Standard") == 36.0
+    spa = Spa(make(profile="baden", heater_locked=True), water=30.0)
+    spa.run(ECHO_WINDOW + EXTERNAL_STABLE + 120)
+    assert spa.r.targets["baden"] == 37.0
 
 
 def test_unlocking_heater_restores_target():
-    spa = Spa(make(heater_locked=True), mode="Standard", water=30.0)
+    spa = Spa(make(profile="baden", heater_locked=True), water=30.0)
     spa.run(60)
     assert spa.setpoints["Standard"] == 31.0
     spa.r.settings.heater_locked = False
     spa.step(1, force=True)
-    assert spa.setpoints["Standard"] == 36.0
-
-
-def test_pause_writes_nothing_and_restore_gives_target():
-    spa = Spa(make(), water=30.0)
-    spa.run(120)
-    assert spa.setpoints["Away"] == 28.5
-    restore = spa.r.pause_restore(
-        Inputs(now=spa.now, mode="Away", water=30.0, setpoint=spa.setpoint)
-    )
-    assert restore == 30.0
-    spa.r.settings.active = False
-    spa.setpoints["Away"] = restore
-    d = spa.run(300)
-    assert d.phase == PHASE_PAUSED
-    assert spa.writes == [("Away", 28.5)]
-    # Changes made while paused are adopted, not overwritten, on resume.
-    spa.setpoints["Away"] = 31.0
-    spa.run(30)
-    spa.r.settings.active = True
-    spa.water = 29.0
-    spa.run(MODE_GRACE + EXTERNAL_STABLE)
-    assert spa.setpoints["Away"] == 31.0
-
-
-def test_state_survives_restart():
-    spa = Spa(make(), water=30.0)
-    spa.run(120)
-    saved = spa.r.as_dict()
-    fresh = make()
-    fresh.load(saved)
-    spa.r = fresh
-    spa.run(300)
-    assert fresh.target("Away") == 30.0
-    assert fresh.lowered("Away")
-    spa.water = 29.0
-    spa.run(30)
-    assert spa.setpoints["Away"] == 30.0
+    assert spa.setpoints["Standard"] == 37.0
 
 
 @pytest.mark.parametrize(("water", "expected"), [(31.2, 32.5), (31.5, 32.5), (31.6, 33.0)])
 def test_cap_is_rounded_up_to_step(water, expected):
-    spa = Spa(make(heater_locked=True), mode="Standard", water=water)
+    spa = Spa(make(profile="baden", heater_locked=True), water=water)
     spa.run(60)
     assert spa.setpoints["Standard"] == expected
 
 
-def test_first_switch_into_unknown_mode_ignores_stale_setpoint():
-    """Seen live: Gecko reports Standard with the Away setpoint for a few
-    seconds. That stale value must not become the Standard target."""
-    spa = Spa(make(), water=32.0, setpoints={"Away": 22.0, "Standard": 33.0})
-    spa.run(120)
-    spa.mode = "Standard"
-    stale = spa.setpoints["Standard"]
-    spa.setpoints["Standard"] = 22.0  # stale report
-    spa.step(1)
-    spa.step(6)
-    spa.setpoints["Standard"] = stale  # the real Standard setpoint arrives
-    spa.run(120)
-    assert spa.r.target("Standard") == 33.0
-    assert all(mode == "Away" for mode, _ in spa.writes)
-
-
 def test_locked_heater_that_keeps_running_is_shed():
-    spa = Spa(make(heater_locked=True), mode="Standard", water=32.0,
-              setpoints={"Away": 22.0, "Standard": 33.0})
-    spa.step()
-    spa.r.set_target("Standard", 38.0)
-    spa.run(30)
+    spa = Spa(make(bath=38.0, profile="baden", heater_locked=True), water=32.0)
+    spa.run(60)
     assert spa.setpoints["Standard"] == 33.0
-    # Gecko keeps the heater latched although the gap is only 1 K.
-    spa.heater = True
+    spa.heater = True  # Gecko keeps the heater latched at 1 K gap
     d = spa.run(HEATER_SHED_DELAY + 30)
     assert d.phase == PHASE_SHEDDING
-    assert spa.setpoints["Standard"] == 31.5  # below the water: heating stops
+    assert spa.setpoints["Standard"] == 31.5
     spa.heater = False
     d = spa.run(HEATER_OFF_HOLD + 30)
     assert d.phase == PHASE_HEATING_NO_HEATER
     assert spa.setpoints["Standard"] == 33.0
-    # The real target never changed, nothing was taken over as external.
     spa.run(300)
-    assert spa.r.target("Standard") == 38.0
+    assert spa.r.targets["baden"] == 38.0
 
 
 def test_running_heater_is_not_shed_when_allowed():
-    spa = Spa(make(), mode="Standard", water=32.0)
-    spa.run(30)
+    spa = Spa(make(profile="baden"), water=32.0, setpoints={"Standard": 37.0})
     spa.heater = True
     spa.run(600)
     assert spa.writes == []
 
 
-def test_unlocking_ends_shedding():
-    spa = Spa(make(heater_locked=True), mode="Standard", water=30.0)
+def test_pause_writes_nothing_and_adopts_changes_made_meanwhile():
+    spa = Spa(make(eco=30.0), water=30.0)
+    spa.run(120)
+    assert spa.setpoints["Standard"] == 28.5
+    restore = spa.r.pause_restore(
+        Inputs(now=spa.now, mode="Standard", water=30.0, setpoint=spa.setpoint)
+    )
+    assert restore == 30.0
+    spa.r.settings.active = False
+    spa.setpoints["Standard"] = restore
+    assert spa.run(300).phase == PHASE_PAUSED
+    spa.setpoints["Standard"] = 31.0
+    spa.run(120)
+    assert spa.r.targets["eco"] == 31.0
+    spa.r.settings.active = True
+    spa.water = 29.0
+    spa.run(120)
+    assert spa.setpoints["Standard"] == 31.0
+
+
+def test_paused_regler_does_not_enforce_work_mode():
+    spa = Spa(make(), mode="Away")
+    spa.r.settings.active = False
+    spa.run(300)
+    assert spa.mode_switches == []
+
+
+def test_state_survives_restart():
+    spa = Spa(make(eco=30.0), water=30.0)
+    spa.run(120)
+    saved = spa.r.as_dict()
+    fresh = Regler()
+    fresh.load(saved)
+    spa.r = fresh
+    spa.run(300)
+    assert fresh.targets["eco"] == 30.0
+    assert fresh.lowered
+    spa.water = 29.0
     spa.run(30)
-    spa.heater = True
-    spa.run(HEATER_SHED_DELAY + 30)
-    assert spa.step().phase == PHASE_SHEDDING
-    spa.r.settings.heater_locked = False
-    spa.step(1, force=True)
-    assert spa.setpoints["Standard"] == 36.0
+    assert spa.setpoints["Standard"] == 30.0
+
+
+def test_first_value_settles_before_writing():
+    spa = Spa(make(eco=25.0, hysteresis_enabled=False), water=20.0,
+              setpoints={"Standard": 34.0})
+    spa.step()
+    spa.step(SETPOINT_SETTLE / 2)
+    assert spa.writes == []

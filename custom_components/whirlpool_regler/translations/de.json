@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Whirlpool-Regler",
-        "description": "Wähle die Entitäten der Gecko-Integration. Der Regler ist danach der einzige, der den Gecko-Sollwert schreibt.",
+        "description": "Wähle die Entitäten der Gecko-Integration. Der Regler ist danach der einzige, der den Gecko-Sollwert schreibt, und hält den Whirlpool im Watercare-Modus Standard.",
         "data": {
           "climate_entity": "Gecko-Thermostat",
           "watercare_entity": "Watercare-Modus",
@@ -24,9 +24,10 @@
   "options": {
     "step": {
       "init": {
-        "title": "Hysterese",
+        "title": "Watercare-Modus",
+        "description": "Der Whirlpool läuft immer in diesem Watercare-Modus. Den Eco-Betrieb übernimmt der Regler selbst. Wird der Modus woanders umgestellt, schaltet der Regler nach einer Minute zurück.",
         "data": {
-          "hysteresis_modes": "Hysterese in diesen Watercare-Modi"
+          "work_mode": "Arbeitsmodus"
         }
       }
     }
@@ -36,7 +37,11 @@
       "regler": {
         "state_attributes": {
           "preset_mode": {
-            "name": "Watercare-Modus"
+            "name": "Profil",
+            "state": {
+              "eco": "Eco",
+              "baden": "Baden"
+            }
           }
         }
       }
@@ -56,6 +61,12 @@
       },
       "heizstab_abstand": {
         "name": "Abstand bei gesperrtem Heizstab"
+      },
+      "eco_temperatur": {
+        "name": "Eco-Temperatur"
+      },
+      "badetemperatur": {
+        "name": "Badetemperatur"
       }
     },
     "switch": {
@@ -73,7 +84,8 @@
           "heizen_ohne_heizstab": "Heizen ohne Heizstab",
           "ziel_erreicht": "Ziel erreicht",
           "abgesenkt": "Abgesenkt (Hysterese)",
-          "heizstab_abwurf": "Heizstab wird abgeworfen"
+          "heizstab_abwurf": "Heizstab wird abgeworfen",
+          "falscher_modus": "Falscher Watercare-Modus"
         }
       }
     },

@@ -1,25 +1,34 @@
 """Control logic of the Whirlpool-Regler, free of Home Assistant imports.
 
-The Regler is the only writer of the Gecko setpoint. It keeps the real target
-temperature per watercare mode and derives the setpoint the spa should get:
+The spa always runs in one watercare mode (Standard). The Regler is the only
+writer of the Gecko setpoint and implements its own eco mode with two
+targets:
 
-* Hysteresis: once the water has reached the target, the setpoint is lowered
-  to target - span - 0.5 K so the heat pump does not short-cycle. When the
-  water has cooled down by the span, the target is restored and the heat pump
-  runs through.
-* Heater lock: with Smart Heat, Gecko switches the electric heater on when the
-  gap between setpoint and water is large. While the heater is locked, the
-  setpoint is kept at water + gap (rounded up to the setpoint step) and
+* eco: the temperature the water is kept at when nobody bathes.
+* baden: the bathing temperature.
+
+On top of the active target it derives the setpoint the spa gets:
+
+* Hysteresis (eco only): once the water has reached the eco target, the
+  setpoint is lowered to target - span - 0.5 K so the heat pump does not
+  short-cycle. When the water has cooled down by the span, the target is
+  restored and the heat pump runs through.
+* Heater lock: with Smart Heat, Gecko switches the electric heater on when
+  the gap between setpoint and water is large. While the heater is locked,
+  the setpoint is kept at water + gap (rounded up to the setpoint step) and
   tracked upwards as the water warms, never beyond the target.
+* Heater shedding: Gecko keeps a running heater on even when the gap gets
+  small. If it runs although it is locked, the setpoint is dropped below the
+  water until the heater is off.
 
 Gecko quirks the logic filters:
 
 * After a write Gecko briefly reports the old value again (echo).
 * Around midnight the setpoint jumps to another value for 1-2 s.
-* Every watercare mode has its own setpoint, so a mode change changes the
-  reported setpoint without anyone touching it.
+* After a watercare mode change Gecko reports the previous mode's setpoint
+  for a few seconds.
 * A setpoint that is changed by someone else (app, control panel) and stays
-  stable is taken over as the new target of that mode.
+  stable is taken over as the new target of the active profile.
 
 All times are monotonic seconds supplied by the caller, which keeps the logic
 deterministic and easy to test.
@@ -31,10 +40,19 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+PROFILE_ECO = "eco"
+PROFILE_BATH = "baden"
+PROFILES = [PROFILE_ECO, PROFILE_BATH]
+
+DEFAULT_TARGETS = {PROFILE_ECO: 25.0, PROFILE_BATH: 37.0}
+
 # Seconds the water must stay at or above the target before lowering.
 REACHED_DELAY = 30.0
 # Seconds a watercare mode must be stable before the Regler writes.
 MODE_SETTLE = 15.0
+# Seconds the spa may be in another watercare mode before it is switched
+# back to the work mode, and the minimum time between two such switches.
+MODE_ENFORCE_DELAY = 60.0
 # Seconds the reported setpoint must be stable before the Regler writes
 # (filters the midnight blip).
 SETPOINT_SETTLE = 10.0
@@ -46,9 +64,7 @@ EXTERNAL_STABLE = 60.0
 MODE_GRACE = 90.0
 # How often a write that Gecko did not apply is repeated.
 MAX_RETRIES = 3
-# Seconds the heater may keep running while it is locked before the Regler
-# sheds it. Gecko keeps a running heater on even when the gap gets small, so
-# the setpoint is dropped below the water until the heater is off.
+# Seconds the heater may keep running while it is locked before it is shed.
 HEATER_SHED_DELAY = 60.0
 # Seconds the heater must be off before the capped setpoint is restored.
 HEATER_OFF_HOLD = 30.0
@@ -57,6 +73,7 @@ EPS = 0.01
 
 PHASE_WAITING = "wartet"
 PHASE_PAUSED = "pausiert"
+PHASE_WRONG_MODE = "falscher_modus"
 PHASE_HEATING = "heizen"
 PHASE_HEATING_NO_HEATER = "heizen_ohne_heizstab"
 PHASE_HOLDING = "ziel_erreicht"
@@ -66,6 +83,7 @@ PHASE_SHEDDING = "heizstab_abwurf"
 PHASES = [
     PHASE_WAITING,
     PHASE_PAUSED,
+    PHASE_WRONG_MODE,
     PHASE_HEATING,
     PHASE_HEATING_NO_HEATER,
     PHASE_HOLDING,
@@ -80,10 +98,10 @@ class Settings:
 
     active: bool = True
     hysteresis_enabled: bool = True
-    hysteresis_modes: frozenset[str] = frozenset({"Away"})
     span: float = 1.0
     heater_locked: bool = False
     heater_gap: float = 1.0
+    work_mode: str = "Standard"
     min_temp: float = 8.0
     max_temp: float = 40.0
     step: float = 0.5
@@ -109,27 +127,25 @@ class Decision:
     target: float | None = None
     desired: float | None = None
     write: float | None = None
+    switch_mode: str | None = None
     adopted_external: bool = False
 
 
 @dataclass
-class _ModeState:
-    target: float | None = None
-    lowered: bool = False
-    cap: float | None = None
-    commanded: float | None = None
-
-
-@dataclass
 class Regler:
-    """Stateful controller. Feed it with update(); it tells what to write."""
+    """Stateful controller. Feed it with update(); it tells what to do."""
 
     settings: Settings = field(default_factory=Settings)
-    modes: dict[str, _ModeState] = field(default_factory=dict)
+    profile: str = PROFILE_ECO
+    targets: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_TARGETS))
+    lowered: bool = False
 
     # Runtime bookkeeping (not persisted).
+    _cap: float | None = None
+    _commanded: float | None = None
     _mode: str | None = None
     _mode_since: float = -math.inf
+    _last_mode_switch: float = -math.inf
     _seen_setpoint: float | None = None
     _seen_since: float = -math.inf
     _reached_since: float | None = None
@@ -143,43 +159,60 @@ class Regler:
     # --- persistence --------------------------------------------------------
 
     def as_dict(self) -> dict[str, Any]:
-        """Persistent part of the state."""
         return {
-            "modes": {
-                name: {"target": st.target, "lowered": st.lowered}
-                for name, st in self.modes.items()
-            }
+            "profile": self.profile,
+            "targets": dict(self.targets),
+            "lowered": self.lowered,
         }
 
     def load(self, data: dict[str, Any] | None) -> None:
-        """Restore state saved by as_dict()."""
-        for name, raw in ((data or {}).get("modes") or {}).items():
-            st = self._state(name)
-            target = raw.get("target")
-            st.target = float(target) if target is not None else None
-            st.lowered = bool(raw.get("lowered", False))
+        data = data or {}
+        if data.get("profile") in PROFILES:
+            self.profile = data["profile"]
+        for name, value in (data.get("targets") or {}).items():
+            if name in PROFILES and value is not None:
+                self.targets[name] = float(value)
+        self.lowered = bool(data.get("lowered", False))
 
     # --- queries ------------------------------------------------------------
 
-    def target(self, mode: str | None) -> float | None:
-        """Real target temperature of a mode."""
-        if mode is None or mode not in self.modes:
-            return None
-        return self.modes[mode].target
-
-    def lowered(self, mode: str | None) -> bool:
-        return mode is not None and mode in self.modes and self.modes[mode].lowered
+    @property
+    def target(self) -> float:
+        return self.targets[self.profile]
 
     # --- commands -----------------------------------------------------------
 
-    def set_target(self, mode: str, target: float) -> None:
-        """The user sets a new real target for a mode."""
-        st = self._state(mode)
-        st.target = self._clamp(target)
-        st.lowered = False
-        st.cap = None
-        if mode == self._mode:
-            self._reached_since = None
+    def set_target(self, value: float, profile: str | None = None) -> None:
+        """Set the target of a profile (default: the active one)."""
+        profile = profile or self.profile
+        self.targets[profile] = self._clamp(value)
+        if profile == self.profile:
+            self._reset_control()
+
+    def set_profile(self, profile: str) -> None:
+        if profile not in PROFILES:
+            raise ValueError(profile)
+        if profile != self.profile:
+            self.profile = profile
+            self._reset_control()
+
+    def pause_restore(self, inp: Inputs) -> float | None:
+        """Setpoint to write once when the Regler is paused.
+
+        Leaves the spa on the real target instead of a lowered, capped or
+        shed value. Returns None when nothing needs to be written.
+        """
+        self._reset_control()
+        if (
+            not inp.available
+            or inp.mode != self.settings.work_mode
+            or inp.setpoint is None
+            or abs(inp.setpoint - self.target) <= EPS
+        ):
+            return None
+        self._pre_write_setpoint = inp.setpoint
+        self._last_write = inp.now
+        return self.target
 
     # --- evaluation ---------------------------------------------------------
 
@@ -188,7 +221,7 @@ class Regler:
 
         force=True skips the setpoint settle time (used right after a user
         command so the spa reacts at once). The mode settle time still
-        applies, because a write always lands in the mode the spa is in.
+        applies, because Gecko reports stale values right after a switch.
         """
         s = self.settings
 
@@ -212,79 +245,79 @@ class Regler:
             or inp.water is None
             or inp.setpoint is None
         ):
-            return Decision(phase=PHASE_WAITING, target=self.target(inp.mode))
-
-        st = self._state(inp.mode)
-        if st.target is None:
-            # First time in this mode: whatever the spa has is the target.
-            # Right after a mode switch Gecko still reports the old mode's
-            # setpoint for a few seconds, so wait until both have settled.
-            if (
-                inp.now - self._mode_since < MODE_SETTLE
-                or inp.now - self._seen_since < SETPOINT_SETTLE
-            ):
-                return Decision(phase=PHASE_WAITING)
-            st.target = inp.setpoint
-            st.commanded = inp.setpoint
+            return Decision(phase=PHASE_WAITING, target=self.target)
 
         if not s.active:
             # Paused: Gecko is in charge. A stable setpoint is the target, so
             # the Regler continues from there when it is switched back on.
-            st.cap = None
-            st.lowered = False
-            self._reached_since = None
+            self._reset_control()
             if (
-                inp.now - self._last_write >= ECHO_WINDOW
+                inp.mode == s.work_mode
+                and inp.now - self._last_write >= ECHO_WINDOW
                 and inp.now - self._seen_since >= EXTERNAL_STABLE
             ):
-                st.target = inp.setpoint
-            st.commanded = st.target
-            return Decision(phase=PHASE_PAUSED, target=st.target)
+                self.targets[self.profile] = inp.setpoint
+            self._commanded = None
+            return Decision(phase=PHASE_PAUSED, target=self.target)
 
-        adopted = self._check_external(inp, st)
+        if inp.mode != s.work_mode:
+            # Someone switched the watercare mode. Its setpoint is not ours;
+            # switch back after a while.
+            self._commanded = None
+            switch = None
+            if (
+                inp.now - self._mode_since >= MODE_ENFORCE_DELAY
+                and inp.now - self._last_mode_switch >= MODE_ENFORCE_DELAY
+            ):
+                switch = s.work_mode
+                self._last_mode_switch = inp.now
+            return Decision(
+                phase=PHASE_WRONG_MODE, target=self.target, switch_mode=switch
+            )
 
-        target = st.target
+        adopted = self._check_external(inp)
+
+        target = self.target
         water = inp.water
-        hysteresis = s.hysteresis_enabled and inp.mode in s.hysteresis_modes
+        hysteresis = s.hysteresis_enabled and self.profile == PROFILE_ECO
 
         if not hysteresis:
-            st.lowered = False
-        if st.lowered and water <= target - s.span + EPS:
-            st.lowered = False
+            self.lowered = False
+        if self.lowered and water <= target - s.span + EPS:
+            self.lowered = False
             self._reached_since = None
-        if hysteresis and not st.lowered:
+        if hysteresis and not self.lowered:
             if water >= target - EPS:
                 if self._reached_since is None:
                     self._reached_since = inp.now
                 if inp.now - self._reached_since >= REACHED_DELAY:
-                    st.lowered = True
-                    st.cap = None
+                    self.lowered = True
             else:
                 self._reached_since = None
 
-        if st.lowered:
+        if self.lowered:
             desired = self._round(target - s.span - 0.5)
             phase = PHASE_LOWERED
-            st.cap = None
+            self._cap = None
         elif s.heater_locked and water + s.heater_gap < target - EPS:
             cap = self._ceil(water + s.heater_gap)
-            if st.cap is not None:
-                cap = max(cap, st.cap)
+            if self._cap is not None:
+                cap = max(cap, self._cap)
             cap = min(cap, target)
-            st.cap = cap
+            self._cap = cap
             desired = cap
             phase = PHASE_HEATING_NO_HEATER
         else:
-            st.cap = None
+            self._cap = None
             desired = self._round(target)
             phase = PHASE_HEATING if water < target - EPS else PHASE_HOLDING
 
-        if self._update_shedding(inp, st.lowered):
+        if self._update_shedding(inp):
             desired = min(desired, self._floor(water) - s.step)
             phase = PHASE_SHEDDING
 
         desired = self._clamp(desired)
-        write = self._maybe_write(inp, st, desired, force=force)
+        write = self._maybe_write(inp, desired, force=force)
         return Decision(
             phase=phase,
             target=target,
@@ -293,36 +326,62 @@ class Regler:
             adopted_external=adopted,
         )
 
-    def pause_restore(self, inp: Inputs) -> float | None:
-        """Setpoint to write once when the Regler is paused.
-
-        Leaves the spa on the real target instead of a lowered or capped
-        value. Returns None when nothing needs to be written.
-        """
-        if not inp.available or inp.mode is None or inp.setpoint is None:
-            return None
-        st = self.modes.get(inp.mode)
-        if st is None or st.target is None:
-            return None
-        st.lowered = False
-        st.cap = None
-        if abs(inp.setpoint - st.target) <= EPS:
-            return None
-        self._pre_write_setpoint = inp.setpoint
-        self._last_write = inp.now
-        return st.target
-
     # --- internals ----------------------------------------------------------
 
-    def _update_shedding(self, inp: Inputs, lowered: bool) -> bool:
+    def _reset_control(self) -> None:
+        self.lowered = False
+        self._cap = None
+        self._reached_since = None
+        self._shedding = False
+        self._heater_since = None
+        self._heater_off_since = None
+
+    def _check_external(self, inp: Inputs) -> bool:
+        """Take over a setpoint someone else wrote; retry lost own writes."""
+        sp = inp.setpoint
+        if self._commanded is None:
+            # Nothing sent yet (startup, back in the work mode): the reported
+            # value is the baseline once it has settled.
+            if inp.now - self._seen_since >= SETPOINT_SETTLE and (
+                inp.now - self._mode_since >= MODE_SETTLE
+            ):
+                self._commanded = sp
+            return False
+        if abs(sp - self._commanded) <= EPS:
+            self._retries = 0
+            return False
+        if inp.now - self._last_write < ECHO_WINDOW:
+            return False
+        if inp.now - self._mode_since < MODE_GRACE:
+            return False
+        if inp.now - self._seen_since < EXTERNAL_STABLE:
+            return False
+        if (
+            self._pre_write_setpoint is not None
+            and abs(sp - self._pre_write_setpoint) <= EPS
+            and self._retries < MAX_RETRIES
+        ):
+            # Our last write did not arrive; send it again.
+            self._retries += 1
+            self._commanded = None
+            self._seen_since = -math.inf
+            return False
+        # Someone else set a new value: it becomes the active target.
+        self.targets[self.profile] = self._clamp(sp)
+        self._reset_control()
+        self._commanded = sp
+        self._pre_write_setpoint = None
+        self._retries = 0
+        return True
+
+    def _update_shedding(self, inp: Inputs) -> bool:
         """Track whether a locked heater has to be forced off."""
-        running = bool(inp.heater_running)
-        if not self.settings.heater_locked or lowered:
+        if not self.settings.heater_locked or self.lowered:
             self._shedding = False
             self._heater_since = None
             self._heater_off_since = None
             return False
-        if running:
+        if inp.heater_running:
             self._heater_off_since = None
             if self._heater_since is None:
                 self._heater_since = inp.now
@@ -338,53 +397,11 @@ class Regler:
                     self._heater_off_since = None
         return self._shedding
 
-    def _check_external(self, inp: Inputs, st: _ModeState) -> bool:
-        """Take over a setpoint someone else wrote; retry lost own writes."""
-        if st.commanded is None:
-            st.commanded = inp.setpoint
-            return False
-        sp = inp.setpoint
-        if abs(sp - st.commanded) <= EPS:
-            self._retries = 0
-            return False
-        if inp.now - self._last_write < ECHO_WINDOW:
-            return False
-        if inp.now - self._mode_since < MODE_GRACE:
-            # After a mode change the spa reports that mode's own setpoint.
-            # Treat it as the new baseline instead of an external change.
-            if inp.now - self._seen_since >= SETPOINT_SETTLE:
-                st.commanded = sp
-            return False
-        if inp.now - self._seen_since < EXTERNAL_STABLE:
-            return False
-        if (
-            self._pre_write_setpoint is not None
-            and abs(sp - self._pre_write_setpoint) <= EPS
-            and self._retries < MAX_RETRIES
-        ):
-            # Our last write did not arrive; leave commanded as is so that
-            # _maybe_write sends it again.
-            self._retries += 1
-            st.commanded = None
-            return False
-        # Someone else set a new value: it becomes the target of this mode,
-        # unless it is just our own lowered/capped value coming back.
-        st.target = sp
-        st.lowered = False
-        st.cap = None
-        st.commanded = sp
-        self._reached_since = None
-        self._pre_write_setpoint = None
-        self._retries = 0
-        return True
-
-    def _maybe_write(
-        self, inp: Inputs, st: _ModeState, desired: float, *, force: bool
-    ) -> float | None:
+    def _maybe_write(self, inp: Inputs, desired: float, *, force: bool) -> float | None:
         if abs(inp.setpoint - desired) <= EPS:
-            st.commanded = desired
+            self._commanded = desired
             return None
-        if st.commanded is not None and abs(st.commanded - desired) <= EPS:
+        if self._commanded is not None and abs(self._commanded - desired) <= EPS:
             # Already sent; waiting for Gecko to report it.
             return None
         if inp.now - self._mode_since < MODE_SETTLE:
@@ -393,13 +410,8 @@ class Regler:
             return None
         self._pre_write_setpoint = inp.setpoint
         self._last_write = inp.now
-        st.commanded = desired
+        self._commanded = desired
         return desired
-
-    def _state(self, mode: str) -> _ModeState:
-        if mode not in self.modes:
-            self.modes[mode] = _ModeState()
-        return self.modes[mode]
 
     def _clamp(self, value: float) -> float:
         s = self.settings

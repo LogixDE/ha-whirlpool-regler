@@ -37,13 +37,12 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_CLIMATE,
-    CONF_HYSTERESIS_MODES,
     CONF_WATER_SENSOR,
     CONF_WATERCARE,
-    DEFAULT_HYSTERESIS_MODES,
+    CONF_WORK_MODE,
+    DEFAULT_WORK_MODE,
     DOMAIN,
     EVAL_INTERVAL_SECONDS,
-    NON_SELECTABLE_MODES,
     STORAGE_VERSION,
 )
 from .logic import Decision, Inputs, PHASE_WAITING, Regler, Settings
@@ -72,11 +71,12 @@ class WhirlpoolRuntime:
         self.climate_id: str = conf[CONF_CLIMATE]
         self.watercare_id: str = conf[CONF_WATERCARE]
         self.water_sensor_id: str | None = conf.get(CONF_WATER_SENSOR) or None
-        modes = conf.get(CONF_HYSTERESIS_MODES, DEFAULT_HYSTERESIS_MODES)
-        self.regler = Regler(Settings(hysteresis_modes=frozenset(modes)))
+        self.regler = Regler(
+            Settings(work_mode=conf.get(CONF_WORK_MODE, DEFAULT_WORK_MODE))
+        )
         self.decision = Decision(phase=PHASE_WAITING)
         self._store: Store[dict[str, Any]] = Store(
-            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.v2"
         )
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[CALLBACK_TYPE] = []
@@ -85,7 +85,9 @@ class WhirlpoolRuntime:
     # --- lifecycle ----------------------------------------------------------
 
     async def async_start(self) -> None:
-        data = await self._store.async_load() or {}
+        data = await self._store.async_load()
+        if data is None:
+            data = await self._async_migrate_v1()
         self.regler.load(data)
         s = self.regler.settings
         for key in _SETTING_KEYS:
@@ -106,6 +108,29 @@ class WhirlpoolRuntime:
             )
         )
         await self.async_evaluate()
+
+    async def _async_migrate_v1(self) -> dict[str, Any]:
+        """Take over targets and settings of version 0.1 (one target per
+        watercare mode): Away becomes eco, Standard becomes baden."""
+        old: Store[dict[str, Any]] = Store(
+            self.hass, STORAGE_VERSION, f"{DOMAIN}.{self.entry.entry_id}"
+        )
+        data = await old.async_load()
+        if not data:
+            return {}
+        modes = data.get("modes") or {}
+        targets = {}
+        for mode, profile in (("Away", "eco"), ("Standard", "baden")):
+            target = (modes.get(mode) or {}).get("target")
+            if target is not None:
+                targets[profile] = target
+        migrated = {
+            "profile": "eco" if self.mode == "Away" else "baden",
+            "targets": targets,
+            "settings": data.get("settings", {}),
+        }
+        _LOGGER.info("Migrated Regler state from 0.1: %s", migrated)
+        return migrated
 
     async def async_stop(self) -> None:
         for unsub in self._unsubs:
@@ -149,12 +174,6 @@ class WhirlpoolRuntime:
         if state is None or state.state in _BAD_STATES:
             return None
         return state.state
-
-    @property
-    def mode_options(self) -> list[str]:
-        state = self.hass.states.get(self.watercare_id)
-        options = state.attributes.get("options", []) if state else []
-        return [o for o in options if o not in NON_SELECTABLE_MODES]
 
     @property
     def water(self) -> float | None:
@@ -228,11 +247,18 @@ class WhirlpoolRuntime:
         self.decision = self.regler.update(self._inputs(), force=force)
         if self.decision.adopted_external:
             _LOGGER.info(
-                "Setpoint %s of mode %s was changed outside the Regler; "
-                "taken over as the new target",
+                "Setpoint %s was changed outside the Regler; taken over as the "
+                "new %s target",
                 self.decision.target,
-                self.mode,
+                self.regler.profile,
             )
+        if self.decision.switch_mode is not None:
+            _LOGGER.info(
+                "Watercare mode is %s; switching back to %s",
+                self.mode,
+                self.decision.switch_mode,
+            )
+            await self._async_select_mode(self.decision.switch_mode)
         if self.decision.write is not None:
             await self._async_write(self.decision.write)
         if self.regler.as_dict() != before:
@@ -259,21 +285,28 @@ class WhirlpoolRuntime:
 
     # --- commands from the entities -----------------------------------------
 
-    async def async_set_target(self, temperature: float) -> None:
-        mode = self.mode
-        if mode is None:
-            raise HomeAssistantError("Watercare-Modus ist gerade nicht verfügbar")
-        self.regler.set_target(mode, temperature)
+    async def async_set_target(
+        self, temperature: float, profile: str | None = None
+    ) -> None:
+        self.regler.set_target(temperature, profile)
         self._schedule_save()
         await self.async_evaluate(force=True)
 
-    async def async_set_mode(self, mode: str) -> None:
-        await self.hass.services.async_call(
-            SELECT_DOMAIN,
-            SERVICE_SELECT_OPTION,
-            {ATTR_ENTITY_ID: self.watercare_id, ATTR_OPTION: mode},
-            blocking=True,
-        )
+    async def async_set_profile(self, profile: str) -> None:
+        self.regler.set_profile(profile)
+        self._schedule_save()
+        await self.async_evaluate(force=True)
+
+    async def _async_select_mode(self, mode: str) -> None:
+        try:
+            await self.hass.services.async_call(
+                SELECT_DOMAIN,
+                SERVICE_SELECT_OPTION,
+                {ATTR_ENTITY_ID: self.watercare_id, ATTR_OPTION: mode},
+                blocking=True,
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("Could not switch watercare mode to %s: %s", mode, err)
 
     async def async_set_setting(self, key: str, value: Any) -> None:
         s = self.regler.settings

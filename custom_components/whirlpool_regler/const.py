@@ -9,11 +9,12 @@ DOMAIN = "whirlpool_regler"
 CONF_CLIMATE = "climate_entity"
 CONF_WATERCARE = "watercare_entity"
 CONF_WATER_SENSOR = "water_sensor"
-CONF_HYSTERESIS_MODES = "hysteresis_modes"
+CONF_WORK_MODE = "work_mode"
 
-DEFAULT_HYSTERESIS_MODES = ["Away"]
+# The watercare mode the spa always runs in. The Regler implements eco itself.
+DEFAULT_WORK_MODE = "Standard"
 
-# Watercare options that cannot be selected as a target mode.
+# Watercare options that cannot be selected as the work mode.
 NON_SELECTABLE_MODES = frozenset({"Other"})
 
 HEATER_ALLOWED = "erlaubt"
