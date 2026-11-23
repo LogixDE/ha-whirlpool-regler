@@ -188,6 +188,11 @@ class WhirlpoolRuntime:
         return self.climate_attr("heat_source")
 
     @property
+    def heater_running(self) -> bool | None:
+        source = self.heat_source
+        return None if source is None else "electric" in str(source)
+
+    @property
     def available(self) -> bool:
         climate = self.climate_state
         return (
@@ -209,6 +214,7 @@ class WhirlpoolRuntime:
             water=self.water,
             setpoint=self.gecko_setpoint,
             available=self.available,
+            heater_running=self.heater_running,
         )
 
     # --- evaluation ---------------------------------------------------------

@@ -72,7 +72,8 @@
           "heizen": "Heizen",
           "heizen_ohne_heizstab": "Heizen ohne Heizstab",
           "ziel_erreicht": "Ziel erreicht",
-          "abgesenkt": "Abgesenkt (Hysterese)"
+          "abgesenkt": "Abgesenkt (Hysterese)",
+          "heizstab_abwurf": "Heizstab wird abgeworfen"
         }
       }
     },

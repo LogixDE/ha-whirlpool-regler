@@ -35,8 +35,7 @@ class HeaterRunning(RegelEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        source = self.runtime.heat_source
-        return None if source is None else "electric" in str(source)
+        return self.runtime.heater_running
 
     @property
     def extra_state_attributes(self) -> dict[str, str | None]:

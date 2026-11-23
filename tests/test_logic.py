@@ -16,6 +16,10 @@ from custom_components.whirlpool_regler.logic import (
     PHASE_PAUSED,
     PHASE_WAITING,
     REACHED_DELAY,
+    SETPOINT_SETTLE,
+    HEATER_OFF_HOLD,
+    HEATER_SHED_DELAY,
+    PHASE_SHEDDING,
     Inputs,
     Regler,
     Settings,
@@ -34,6 +38,7 @@ class Spa:
         self.available = True
         self.writes: list[tuple[str, float]] = []
         self.drop_writes = False
+        self.heater = False
 
     @property
     def setpoint(self):
@@ -48,6 +53,7 @@ class Spa:
                 water=self.water,
                 setpoint=self.setpoint,
                 available=self.available,
+                heater_running=self.heater,
             ),
             force=force,
         )
@@ -70,7 +76,8 @@ def make(**settings) -> Regler:
 
 def test_first_contact_adopts_current_setpoint_without_writing():
     spa = Spa(make(), water=25.0)
-    d = spa.step()
+    assert spa.step().phase == PHASE_WAITING
+    d = spa.step(SETPOINT_SETTLE)
     assert d.target == 30.0
     assert d.phase == PHASE_HEATING
     spa.run(120)
@@ -290,3 +297,59 @@ def test_cap_is_rounded_up_to_step(water, expected):
     spa = Spa(make(heater_locked=True), mode="Standard", water=water)
     spa.run(60)
     assert spa.setpoints["Standard"] == expected
+
+
+def test_first_switch_into_unknown_mode_ignores_stale_setpoint():
+    """Seen live: Gecko reports Standard with the Away setpoint for a few
+    seconds. That stale value must not become the Standard target."""
+    spa = Spa(make(), water=32.0, setpoints={"Away": 22.0, "Standard": 33.0})
+    spa.run(120)
+    spa.mode = "Standard"
+    stale = spa.setpoints["Standard"]
+    spa.setpoints["Standard"] = 22.0  # stale report
+    spa.step(1)
+    spa.step(6)
+    spa.setpoints["Standard"] = stale  # the real Standard setpoint arrives
+    spa.run(120)
+    assert spa.r.target("Standard") == 33.0
+    assert all(mode == "Away" for mode, _ in spa.writes)
+
+
+def test_locked_heater_that_keeps_running_is_shed():
+    spa = Spa(make(heater_locked=True), mode="Standard", water=32.0,
+              setpoints={"Away": 22.0, "Standard": 33.0})
+    spa.step()
+    spa.r.set_target("Standard", 38.0)
+    spa.run(30)
+    assert spa.setpoints["Standard"] == 33.0
+    # Gecko keeps the heater latched although the gap is only 1 K.
+    spa.heater = True
+    d = spa.run(HEATER_SHED_DELAY + 30)
+    assert d.phase == PHASE_SHEDDING
+    assert spa.setpoints["Standard"] == 31.5  # below the water: heating stops
+    spa.heater = False
+    d = spa.run(HEATER_OFF_HOLD + 30)
+    assert d.phase == PHASE_HEATING_NO_HEATER
+    assert spa.setpoints["Standard"] == 33.0
+    # The real target never changed, nothing was taken over as external.
+    spa.run(300)
+    assert spa.r.target("Standard") == 38.0
+
+
+def test_running_heater_is_not_shed_when_allowed():
+    spa = Spa(make(), mode="Standard", water=32.0)
+    spa.run(30)
+    spa.heater = True
+    spa.run(600)
+    assert spa.writes == []
+
+
+def test_unlocking_ends_shedding():
+    spa = Spa(make(heater_locked=True), mode="Standard", water=30.0)
+    spa.run(30)
+    spa.heater = True
+    spa.run(HEATER_SHED_DELAY + 30)
+    assert spa.step().phase == PHASE_SHEDDING
+    spa.r.settings.heater_locked = False
+    spa.step(1, force=True)
+    assert spa.setpoints["Standard"] == 36.0

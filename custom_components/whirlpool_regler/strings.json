@@ -72,7 +72,8 @@
           "heizen": "Heating",
           "heizen_ohne_heizstab": "Heating without heater",
           "ziel_erreicht": "Target reached",
-          "abgesenkt": "Lowered (hysteresis)"
+          "abgesenkt": "Lowered (hysteresis)",
+          "heizstab_abwurf": "Shedding heater"
         }
       }
     },

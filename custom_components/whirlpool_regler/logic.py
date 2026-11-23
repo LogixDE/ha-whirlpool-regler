@@ -46,6 +46,12 @@ EXTERNAL_STABLE = 60.0
 MODE_GRACE = 90.0
 # How often a write that Gecko did not apply is repeated.
 MAX_RETRIES = 3
+# Seconds the heater may keep running while it is locked before the Regler
+# sheds it. Gecko keeps a running heater on even when the gap gets small, so
+# the setpoint is dropped below the water until the heater is off.
+HEATER_SHED_DELAY = 60.0
+# Seconds the heater must be off before the capped setpoint is restored.
+HEATER_OFF_HOLD = 30.0
 
 EPS = 0.01
 
@@ -55,6 +61,7 @@ PHASE_HEATING = "heizen"
 PHASE_HEATING_NO_HEATER = "heizen_ohne_heizstab"
 PHASE_HOLDING = "ziel_erreicht"
 PHASE_LOWERED = "abgesenkt"
+PHASE_SHEDDING = "heizstab_abwurf"
 
 PHASES = [
     PHASE_WAITING,
@@ -63,6 +70,7 @@ PHASES = [
     PHASE_HEATING_NO_HEATER,
     PHASE_HOLDING,
     PHASE_LOWERED,
+    PHASE_SHEDDING,
 ]
 
 
@@ -90,6 +98,7 @@ class Inputs:
     water: float | None
     setpoint: float | None
     available: bool = True
+    heater_running: bool | None = None
 
 
 @dataclass
@@ -127,6 +136,9 @@ class Regler:
     _last_write: float = -math.inf
     _pre_write_setpoint: float | None = None
     _retries: int = 0
+    _heater_since: float | None = None
+    _heater_off_since: float | None = None
+    _shedding: bool = False
 
     # --- persistence --------------------------------------------------------
 
@@ -205,6 +217,13 @@ class Regler:
         st = self._state(inp.mode)
         if st.target is None:
             # First time in this mode: whatever the spa has is the target.
+            # Right after a mode switch Gecko still reports the old mode's
+            # setpoint for a few seconds, so wait until both have settled.
+            if (
+                inp.now - self._mode_since < MODE_SETTLE
+                or inp.now - self._seen_since < SETPOINT_SETTLE
+            ):
+                return Decision(phase=PHASE_WAITING)
             st.target = inp.setpoint
             st.commanded = inp.setpoint
 
@@ -260,6 +279,10 @@ class Regler:
             desired = self._round(target)
             phase = PHASE_HEATING if water < target - EPS else PHASE_HOLDING
 
+        if self._update_shedding(inp, st.lowered):
+            desired = min(desired, self._floor(water) - s.step)
+            phase = PHASE_SHEDDING
+
         desired = self._clamp(desired)
         write = self._maybe_write(inp, st, desired, force=force)
         return Decision(
@@ -290,6 +313,30 @@ class Regler:
         return st.target
 
     # --- internals ----------------------------------------------------------
+
+    def _update_shedding(self, inp: Inputs, lowered: bool) -> bool:
+        """Track whether a locked heater has to be forced off."""
+        running = bool(inp.heater_running)
+        if not self.settings.heater_locked or lowered:
+            self._shedding = False
+            self._heater_since = None
+            self._heater_off_since = None
+            return False
+        if running:
+            self._heater_off_since = None
+            if self._heater_since is None:
+                self._heater_since = inp.now
+            if inp.now - self._heater_since >= HEATER_SHED_DELAY:
+                self._shedding = True
+        else:
+            self._heater_since = None
+            if self._shedding:
+                if self._heater_off_since is None:
+                    self._heater_off_since = inp.now
+                if inp.now - self._heater_off_since >= HEATER_OFF_HOLD:
+                    self._shedding = False
+                    self._heater_off_since = None
+        return self._shedding
 
     def _check_external(self, inp: Inputs, st: _ModeState) -> bool:
         """Take over a setpoint someone else wrote; retry lost own writes."""
@@ -361,6 +408,10 @@ class Regler:
     def _round(self, value: float) -> float:
         step = self.settings.step
         return round(round(value / step) * step, 2)
+
+    def _floor(self, value: float) -> float:
+        step = self.settings.step
+        return round(math.floor(value / step + 1e-6) * step, 2)
 
     def _ceil(self, value: float) -> float:
         step = self.settings.step

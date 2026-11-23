@@ -72,7 +72,7 @@ def calls(hass, monkeypatch):
     return writes
 
 
-async def setup_entry(hass) -> MockConfigEntry:
+async def setup_entry(hass, freezer=None) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="Whirlpool-Regler",
@@ -83,6 +83,9 @@ async def setup_entry(hass) -> MockConfigEntry:
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
+    if freezer is not None:
+        # The first target of a mode is taken once the setpoint has settled.
+        await tick(hass, freezer, 15)
     return entry
 
 
@@ -119,9 +122,9 @@ async def test_options_flow_sets_modes(hass: HomeAssistant, calls):
     assert entry.runtime_data.regler.settings.hysteresis_modes == {"Away", "Savings"}
 
 
-async def test_entities_and_target_write(hass: HomeAssistant, calls):
+async def test_entities_and_target_write(hass: HomeAssistant, calls, freezer):
     set_spa(hass)
-    await setup_entry(hass)
+    await setup_entry(hass, freezer)
 
     climate_id = entity(hass, "climate", "regler")
     state = hass.states.get(climate_id)
@@ -141,9 +144,9 @@ async def test_entities_and_target_write(hass: HomeAssistant, calls):
     assert calls == [36.0]
 
 
-async def test_heater_lock_caps_gecko_setpoint(hass: HomeAssistant, calls):
+async def test_heater_lock_caps_gecko_setpoint(hass: HomeAssistant, calls, freezer):
     set_spa(hass, setpoint=34.5, water=31.5)
-    await setup_entry(hass)
+    await setup_entry(hass, freezer)
     await hass.services.async_call(
         "select",
         "select_option",
@@ -163,7 +166,7 @@ async def test_heater_lock_caps_gecko_setpoint(hass: HomeAssistant, calls):
 
 async def test_hysteresis_in_away(hass: HomeAssistant, calls, freezer):
     set_spa(hass, mode="Away", setpoint=23.5, water=23.0)
-    await setup_entry(hass)
+    await setup_entry(hass, freezer)
     set_spa(hass, mode="Away", setpoint=23.5, water=23.5)
     await tick(hass, freezer, 60)
     assert calls == [22.0]
